@@ -73,7 +73,7 @@ def make_ds(df, batch_size=128, timesteps=500, reps=-1, start='random', ws=True)
     
     return ds
 
-  
+# For concurrent tracking of generalization on counterfactual pairs vs. random cross-sectional sample
 def make_dual_val(paired, naive, batch_size=128, timesteps=500, start='random'):
     
     paired = make_ds(paired, batch_size=None, timesteps=timesteps, start=start)
@@ -81,4 +81,32 @@ def make_dual_val(paired, naive, batch_size=128, timesteps=500, start='random'):
     
     ds = Dataset.zip(tuple([paired,naive]))
     ds = ds.batch(batch_size).prefetch(8)
+    return ds
+
+
+# Makes batches containing random slices of a single file (predictions are averaged by the Siamese wrapper)
+def make_eval(x, reps=100, timesteps=500, start='random'):
+    features=40
+    def map_func(path, slices=timesteps, start=start):
+        rec = np.load(path,allow_pickle=True).T 
+        excess = rec.shape[0]-slices
+        if excess>0:
+            start = 0 if start=='zero' else np.random.choice(range(excess))
+            out   = rec[start:start+slices,:,]
+        else:
+            out   = np.zeros((slices, rec.shape[1]))
+            out[:rec.shape[0],:] = rec
+        return out.astype('float32')
+    
+    @tf.function(input_signature=[tf.TensorSpec(None, tf.string)])
+    def tf_load_rec(input):
+        rec = tf.numpy_function(map_func, [input], tf.float32)
+        rec.set_shape((timesteps,features))
+        return rec
+    
+    ds = Dataset.from_tensor_slices([x[0]]).repeat(reps)
+    for i in x[1:]:
+        ds = ds.concatenate(Dataset.from_tensor_slices([i]).repeat(reps))
+    ds = ds.map(tf_load_rec)
+    ds = ds.batch(reps)
     return ds
